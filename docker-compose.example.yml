@@ -1,0 +1,34 @@
+services:
+  social-downloader-bot:
+    image: ghcr.io/proton4/social-downloader-bot:latest
+    container_name: social-downloader-bot
+    restart: unless-stopped
+
+    environment:
+      TZ: Europe/Kyiv
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      ALLOWED_USER_IDS: ${ALLOWED_USER_IDS}
+      DOWNLOAD_ROOT: /downloads
+      CONFIG_ROOT: /config
+      DATABASE_PATH: /config/social-downloader.sqlite3
+      MAX_CONCURRENT_DOWNLOADS: "1"
+      WORKER_POLL_SECONDS: "2"
+      SUBPROCESS_TIMEOUT_SECONDS: "7200"
+      HISTORY_LIMIT: "10"
+      LOG_LEVEL: INFO
+
+    volumes:
+      - /datamain/docker/appdata/social-downloader:/config
+      - /media/social-downloads:/downloads
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    stop_grace_period: 60s
