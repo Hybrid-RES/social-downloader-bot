@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+*.sqlite3
+cookies
+media
+README.md
+docker-compose*.yml
+requirements-dev.txt
+tests
