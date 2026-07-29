@@ -16,6 +16,12 @@ LOGGER = logging.getLogger(__name__)
 CancelCheck = Callable[[], Awaitable[bool]]
 _TIKTOK_VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"}
 _TIKTOK_GALLERY_ATTEMPTS = 3
+_TIKTOK_MAX_FALLBACK_URLS = 20
+_TIKTOK_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/150.0.0.0 Safari/537.36"
+)
 
 
 class DownloadCancelled(RuntimeError):
@@ -109,6 +115,44 @@ class Downloader:
         command.extend(["--", url])
         return command
 
+    def _gallery_dl_urls_command(self, url: str, cookie: Path | None) -> list[str]:
+        command = [
+            "gallery-dl",
+            "--quiet",
+            "--config-ignore",
+            "--config",
+            str(self.gallery_config),
+            "--get-urls",
+            "--no-input",
+            "--retries",
+            "5",
+            "--http-timeout",
+            "45",
+        ]
+        if cookie:
+            command.extend(["--cookies", str(cookie)])
+        command.extend(["--", url])
+        return command
+
+    @staticmethod
+    def _parse_gallery_dl_fallback_urls(output: str) -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("|"):
+                continue
+            candidate = line[1:].strip()
+            if not candidate.startswith(("https://", "http://")):
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            urls.append(candidate)
+            if len(urls) >= _TIKTOK_MAX_FALLBACK_URLS:
+                break
+        return urls
+
     async def _probe_media(self, path: Path, cancel_check: CancelCheck) -> MediaProbe:
         return_code, output = await self._run(
             [
@@ -141,6 +185,25 @@ class Downloader:
             None,
         )
         return MediaProbe(video_codec=video_codec, audio_codec=audio_codec)
+
+    @staticmethod
+    def _replace_source_with_mp4(source: Path, temp: Path) -> Path:
+        destination = source.with_suffix(".mp4")
+        if destination != source and destination.exists():
+            for index in range(2, 10000):
+                candidate = source.with_name(f"{source.stem}_h264_{index:02d}.mp4")
+                if not candidate.exists():
+                    destination = candidate
+                    break
+            else:
+                temp.unlink(missing_ok=True)
+                raise RuntimeError(f"Unable to find a free H.264 filename for {source.name}")
+
+        # Path.replace() atomically removes the old file when destination is source.
+        temp.replace(destination)
+        if destination != source:
+            source.unlink(missing_ok=True)
+        return destination
 
     async def _transcode_tiktok_video(
         self,
@@ -203,22 +266,134 @@ class Downloader:
                 f"video={probe.video_codec or 'none'}, audio={probe.audio_codec or 'none'}"
             )
 
-        destination = source.with_suffix(".mp4")
-        if destination != source and destination.exists():
-            for index in range(2, 10000):
-                candidate = source.with_name(f"{source.stem}_h264_{index:02d}.mp4")
-                if not candidate.exists():
-                    destination = candidate
-                    break
-            else:
-                temp.unlink(missing_ok=True)
-                raise RuntimeError(f"Unable to find a free H.264 filename for {source.name}")
+        return self._replace_source_with_mp4(source, temp)
 
-        # Path.replace() atomically removes the original when source already is .mp4.
-        temp.replace(destination)
-        if destination != source:
-            source.unlink(missing_ok=True)
-        return destination
+    async def _transcode_tiktok_fallback_url(
+        self,
+        *,
+        media_url: str,
+        source: Path,
+        candidate_number: int,
+        cancel_check: CancelCheck,
+    ) -> tuple[bool, str]:
+        temp = source.parent / f".tiktok-fallback-{candidate_number:02d}.tmp"
+        temp.unlink(missing_ok=True)
+
+        return_code, output = await self._run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-nostdin",
+                "-y",
+                "-user_agent",
+                _TIKTOK_USER_AGENT,
+                "-headers",
+                "Referer: https://www.tiktok.com/\r\n",
+                "-i",
+                media_url,
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-ac",
+                "2",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                str(temp),
+            ],
+            cancel_check,
+        )
+        if return_code != 0 or not temp.is_file() or temp.stat().st_size == 0:
+            temp.unlink(missing_ok=True)
+            tail = " ".join(output.strip().splitlines()[-2:])[:300]
+            return False, f"candidate #{candidate_number}: ffmpeg exit={return_code}; {tail or 'no output'}"
+
+        try:
+            probe = await self._probe_media(temp, cancel_check)
+        except RuntimeError as exc:
+            temp.unlink(missing_ok=True)
+            return False, f"candidate #{candidate_number}: {exc}"
+
+        if probe.video_codec != "h264" or probe.audio_codec != "aac":
+            temp.unlink(missing_ok=True)
+            return (
+                False,
+                f"candidate #{candidate_number}: invalid output "
+                f"video={probe.video_codec or 'none'}, audio={probe.audio_codec or 'none'}",
+            )
+
+        destination = self._replace_source_with_mp4(source, temp)
+        return True, f"candidate #{candidate_number}: restored audio as {destination.name}"
+
+    async def _find_single_silent_tiktok_video(
+        self,
+        root: Path,
+        cancel_check: CancelCheck,
+    ) -> Path | None:
+        silent: list[Path] = []
+        for path in media_files(root):
+            if path.suffix.lower() not in _TIKTOK_VIDEO_SUFFIXES:
+                continue
+            try:
+                probe = await self._probe_media(path, cancel_check)
+            except RuntimeError:
+                continue
+            if probe.has_video and not probe.has_audio:
+                silent.append(path)
+        return silent[0] if len(silent) == 1 else None
+
+    async def _recover_tiktok_audio_from_fallbacks(
+        self,
+        *,
+        page_url: str,
+        source: Path,
+        cookie: Path | None,
+        cancel_check: CancelCheck,
+    ) -> tuple[bool, str, str]:
+        return_code, output = await self._run(
+            self._gallery_dl_urls_command(page_url, cookie),
+            cancel_check,
+        )
+        fallback_urls = self._parse_gallery_dl_fallback_urls(output)
+        diagnostics = [
+            f"fallback discovery: exit={return_code}; candidates={len(fallback_urls)}"
+        ]
+
+        if not fallback_urls:
+            return False, "gallery-dl returned no fallback media URLs", "\n".join(diagnostics)
+
+        for candidate_number, media_url in enumerate(fallback_urls, 1):
+            success, detail = await self._transcode_tiktok_fallback_url(
+                media_url=media_url,
+                source=source,
+                candidate_number=candidate_number,
+                cancel_check=cancel_check,
+            )
+            diagnostics.append(detail)
+            if success:
+                return True, detail, "\n".join(diagnostics)
+
+        return (
+            False,
+            f"none of {len(fallback_urls)} fallback URLs contained usable video and audio",
+            "\n".join(diagnostics),
+        )
 
     async def _prepare_tiktok_media(
         self,
@@ -319,7 +494,7 @@ class Downloader:
                 if await cancel_check():
                     raise DownloadCancelled("Cancelled before starting downloader")
 
-                # Keep every engine isolated to avoid treating its diagnostic files as success.
+                # Keep every engine isolated to avoid treating diagnostic files as success.
                 engine_dir = work_dir / engine
                 if engine_dir.exists():
                     shutil.rmtree(engine_dir)
@@ -349,6 +524,40 @@ class Downloader:
                             engine_dir, cancel_check
                         )
                         output = f"{output}\nTikTok validation: {detail}".strip()
+
+                        if (
+                            not ready
+                            and engine == "gallery-dl"
+                            and (
+                                silent_source := await self._find_single_silent_tiktok_video(
+                                    engine_dir, cancel_check
+                                )
+                            )
+                        ):
+                            recovered, recovery_detail, recovery_output = (
+                                await self._recover_tiktok_audio_from_fallbacks(
+                                    page_url=job["url"],
+                                    source=silent_source,
+                                    cookie=cookie,
+                                    cancel_check=cancel_check,
+                                )
+                            )
+                            output = (
+                                f"{output}\nTikTok fallback recovery: {recovery_detail}\n"
+                                f"{recovery_output}"
+                            ).strip()
+                            if recovered:
+                                ready, final_detail, final_transcoded = (
+                                    await self._prepare_tiktok_media(
+                                        engine_dir, cancel_check
+                                    )
+                                )
+                                output = (
+                                    f"{output}\nTikTok final validation: {final_detail}"
+                                ).strip()
+                                transcoded = True
+                                detail = final_detail
+
                         if not ready:
                             attempts.append((attempt_label, return_code, output))
                             LOGGER.warning(
