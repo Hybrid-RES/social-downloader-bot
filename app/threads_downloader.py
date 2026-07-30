@@ -18,6 +18,19 @@ from .threads_extractor import ThreadsExtractionError, ThreadsExtractor
 LOGGER = logging.getLogger(__name__)
 
 
+def _threads_job_url(job: dict) -> str:
+    """Prefer the normalized URL stored at enqueue time.
+
+    Telegram share URLs can contain tracking parameters or invisible characters in
+    the original message entity. The database keeps a clean normalized_url beside
+    the original URL, so native extraction and generic fallbacks should use it.
+    """
+    normalized = str(job.get("normalized_url") or "").strip()
+    if normalized:
+        return normalized
+    return str(job["url"]).strip()
+
+
 class Downloader(BaseDownloader):
     async def _normalize_threads_video(self, source: Path, cancel_check) -> bool:  # type: ignore[no-untyped-def]
         probe = await self._probe_media(source, cancel_check)
@@ -133,6 +146,7 @@ class Downloader(BaseDownloader):
 
         job_id = int(job["id"])
         work_dir = self.settings.work_root / f"job-{job_id}"
+        threads_url = _threads_job_url(job)
 
         # Failed generic extractors can leave thumbnails or incomplete media behind.
         # Start a Threads retry from a clean workspace instead of finalizing stale files.
@@ -146,7 +160,7 @@ class Downloader(BaseDownloader):
 
         try:
             files_count, transcoded = await self._download_threads_native(
-                url=job["url"],
+                url=threads_url,
                 destination=native_dir,
                 cookie=cookie,
                 cancel_check=cancel_check,
@@ -176,9 +190,11 @@ class Downloader(BaseDownloader):
                 native_exc,
             )
             shutil.rmtree(native_dir, ignore_errors=True)
+            fallback_job = dict(job)
+            fallback_job["url"] = threads_url
             try:
                 return await super().download(
-                    job=job,
+                    job=fallback_job,
                     platform=platform,
                     cancel_check=cancel_check,
                 )
