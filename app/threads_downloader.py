@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import logging
+import re
 import shutil
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from .downloader import (
     DownloadCancelled,
@@ -13,9 +16,22 @@ from .downloader import (
 )
 from .platforms import Platform
 from .storage import finalize_files, media_files
-from .threads_extractor import ThreadsExtractionError, ThreadsExtractor
+from .threads_extractor import (
+    ThreadsExtractionError,
+    ThreadsExtractor,
+    canonicalize_threads_url,
+)
 
 LOGGER = logging.getLogger(__name__)
+_THREADS_POST_URL_RE = re.compile(
+    r"https?://(?:www\.)?threads\.(?:com|net)/"
+    r"(?:@[^/\s\"'<>?]+/post/[A-Za-z0-9_-]+|t/[A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
+_THREADS_RELATIVE_POST_URL_RE = re.compile(
+    r"/(?:@[^/\s\"'<>?]+/post/[A-Za-z0-9_-]+|t/[A-Za-z0-9_-]+)",
+    re.IGNORECASE,
+)
 
 
 def _threads_job_url(job: dict) -> str:
@@ -29,6 +45,101 @@ def _threads_job_url(job: dict) -> str:
     if normalized:
         return normalized
     return str(job["url"]).strip()
+
+
+def _is_threads_share_url(url: str) -> bool:
+    parsed = urlsplit(url.strip())
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if host not in {"threads.com", "threads.net"} and not host.endswith(
+        (".threads.com", ".threads.net")
+    ):
+        return False
+    parts = [part for part in parsed.path.split("/") if part]
+    return len(parts) >= 2 and parts[0].lower() == "share" and bool(parts[1])
+
+
+def _extract_threads_post_url(text: str) -> str | None:
+    """Find a canonical Threads post URL in redirect HTML or embedded JSON."""
+    decoded = (
+        html_lib.unescape(text)
+        .replace("\\/", "/")
+        .replace("\\u0026", "&")
+        .replace("\\u003d", "=")
+        .replace("\\u003f", "?")
+    )
+    variants = (decoded, unquote(decoded))
+    for variant in variants:
+        for match in _THREADS_POST_URL_RE.finditer(variant):
+            try:
+                return canonicalize_threads_url(match.group(0))
+            except ThreadsExtractionError:
+                continue
+        for match in _THREADS_RELATIVE_POST_URL_RE.finditer(variant):
+            try:
+                return canonicalize_threads_url(
+                    f"https://www.threads.com{match.group(0)}"
+                )
+            except ThreadsExtractionError:
+                continue
+    return None
+
+
+def _resolve_threads_url_sync(url: str, cookie: Path | None) -> str:
+    """Resolve app-generated /share/ links to a permanent post URL."""
+    try:
+        return canonicalize_threads_url(url)
+    except ThreadsExtractionError as direct_error:
+        if not _is_threads_share_url(url):
+            raise direct_error
+
+    extractor = ThreadsExtractor(cookie)
+    try:
+        response = extractor.session.get(
+            url,
+            headers={"Referer": "https://www.threads.com/"},
+            impersonate="chrome",
+            allow_redirects=True,
+            timeout=45,
+        )
+    except Exception as exc:
+        raise ThreadsExtractionError(
+            f"Unable to resolve Threads share URL: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if response.status_code >= 400:
+        raise ThreadsExtractionError(
+            f"Threads share URL returned HTTP {response.status_code}"
+        )
+
+    redirect_candidates: list[str] = []
+    for historic in getattr(response, "history", ()) or ():
+        historic_url = str(getattr(historic, "url", "") or "")
+        location = str(getattr(historic, "headers", {}).get("location", "") or "")
+        if historic_url:
+            redirect_candidates.append(historic_url)
+        if location:
+            redirect_candidates.append(location)
+
+    final_url = str(getattr(response, "url", "") or "")
+    location = str(getattr(response, "headers", {}).get("location", "") or "")
+    if final_url:
+        redirect_candidates.append(final_url)
+    if location:
+        redirect_candidates.append(location)
+
+    for candidate in redirect_candidates:
+        try:
+            return canonicalize_threads_url(candidate)
+        except ThreadsExtractionError:
+            continue
+
+    resolved_from_body = _extract_threads_post_url(response.text)
+    if resolved_from_body:
+        return resolved_from_body
+
+    raise ThreadsExtractionError(
+        "Threads /share/ link did not reveal a permanent post URL"
+    )
 
 
 class Downloader(BaseDownloader):
@@ -101,6 +212,19 @@ class Downloader(BaseDownloader):
         self._replace_source_with_mp4(source, temp)
         return True
 
+    async def _resolve_threads_url(
+        self,
+        url: str,
+        cookie: Path | None,
+        cancel_check,
+    ) -> str:  # type: ignore[no-untyped-def]
+        if await cancel_check():
+            raise DownloadCancelled("Cancelled before resolving Threads URL")
+        resolved = await asyncio.to_thread(_resolve_threads_url_sync, url, cookie)
+        if await cancel_check():
+            raise DownloadCancelled("Cancelled after resolving Threads URL")
+        return resolved
+
     async def _download_threads_native(
         self,
         *,
@@ -146,7 +270,8 @@ class Downloader(BaseDownloader):
 
         job_id = int(job["id"])
         work_dir = self.settings.work_root / f"job-{job_id}"
-        threads_url = _threads_job_url(job)
+        source_threads_url = _threads_job_url(job)
+        threads_url = source_threads_url
 
         # Failed generic extractors can leave thumbnails or incomplete media behind.
         # Start a Threads retry from a clean workspace instead of finalizing stale files.
@@ -159,6 +284,11 @@ class Downloader(BaseDownloader):
         native_dir.mkdir(parents=True, exist_ok=True)
 
         try:
+            threads_url = await self._resolve_threads_url(
+                source_threads_url,
+                cookie,
+                cancel_check,
+            )
             files_count, transcoded = await self._download_threads_native(
                 url=threads_url,
                 destination=native_dir,
