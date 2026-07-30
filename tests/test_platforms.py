@@ -9,6 +9,7 @@ def test_detect_known_platforms() -> None:
     assert detect_platform("https://vm.tiktok.com/abc/").key == "tiktok"
     assert detect_platform("https://fb.watch/abc/").key == "facebook"
     assert detect_platform("https://www.threads.net/@user/post/abc").key == "threads"
+    assert detect_platform("https://www.threads.com/@user/post/abc").key == "threads"
     assert detect_platform("https://www.linkedin.com/posts/example").key == "linkedin"
 
 
@@ -17,6 +18,13 @@ def test_normalize_tracking_and_twitter_host() -> None:
         "https://www.twitter.com/user/status/123/?utm_source=a&ref_src=b&lang=en#fragment"
     )
     assert value == "https://x.com/user/status/123?lang=en"
+
+
+def test_normalize_threads_share_tracking() -> None:
+    value = normalize_url(
+        "https://www.threads.com/@user/post/ABC/?xmt=tracking&slof=1&utm_source=share"
+    )
+    assert value == "https://threads.com/@user/post/ABC"
 
 
 def test_normalize_keeps_youtube_video_id() -> None:

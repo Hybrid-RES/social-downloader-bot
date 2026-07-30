@@ -8,9 +8,9 @@ from telegram import Bot
 from telegram.error import TelegramError
 
 from .database import Database
-from .downloader import DownloadCancelled, DownloadFailed, Downloader
 from .platforms import PLATFORMS
 from .settings import Settings
+from .threads_downloader import DownloadCancelled, DownloadFailed, Downloader
 
 LOGGER = logging.getLogger(__name__)
 
@@ -70,7 +70,10 @@ class WorkerPool:
         job_id = int(job["id"])
         chat_id = int(job["telegram_chat_id"])
         platform = PLATFORMS.get(job["platform"], PLATFORMS["other"])
-        await self._notify(chat_id, f"⏳ Задание №{job_id}: скачивание началось\nПлатформа: {platform.folder}")
+        await self._notify(
+            chat_id,
+            f"⏳ Задание №{job_id}: скачивание началось\nПлатформа: {platform.folder}",
+        )
 
         async def cancel_check() -> bool:
             return await self.database.cancel_requested(job_id)

@@ -44,6 +44,8 @@ _TRACKING_KEYS = {
     "ref",
     "ref_src",
     "s",
+    "xmt",
+    "slof",
 }
 
 
@@ -61,7 +63,7 @@ def detect_platform(url: str) -> Platform:
         return PLATFORMS["tiktok"]
     if host in {"facebook.com", "fb.watch", "m.facebook.com"} or host.endswith(".facebook.com"):
         return PLATFORMS["facebook"]
-    if host == "threads.net" or host.endswith(".threads.net"):
+    if host in {"threads.com", "threads.net"} or host.endswith((".threads.com", ".threads.net")):
         return PLATFORMS["threads"]
     if host == "linkedin.com" or host.endswith(".linkedin.com") or host == "lnkd.in":
         return PLATFORMS["linkedin"]
