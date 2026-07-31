@@ -8,9 +8,9 @@ from telegram import Bot
 from telegram.error import TelegramError
 
 from .database import Database
-from .linkedin_downloader import DownloadCancelled, DownloadFailed, Downloader
 from .platforms import PLATFORMS
 from .settings import Settings
+from .tumblr_downloader import DownloadCancelled, DownloadFailed, Downloader
 
 LOGGER = logging.getLogger(__name__)
 
