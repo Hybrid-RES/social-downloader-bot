@@ -33,6 +33,9 @@ PLATFORMS: dict[str, Platform] = {
     "pinterest": Platform(
         "pinterest", "Pinterest", ("gallery-dl", "yt-dlp"), ("pinterest.txt",)
     ),
+    "tumblr": Platform(
+        "tumblr", "Tumblr", ("gallery-dl", "yt-dlp"), ("tumblr.txt",)
+    ),
     "other": Platform("other", "Other", ("yt-dlp", "gallery-dl"), ()),
 }
 
@@ -72,6 +75,8 @@ def detect_platform(url: str) -> Platform:
         return PLATFORMS["linkedin"]
     if host == "pin.it" or host == "pinterest.com" or host.endswith(".pinterest.com"):
         return PLATFORMS["pinterest"]
+    if host == "tumblr.com" or host.endswith(".tumblr.com"):
+        return PLATFORMS["tumblr"]
     return PLATFORMS["other"]
 
 
@@ -99,6 +104,8 @@ def normalize_url(url: str) -> str:
     for key, value in parse_qsl(parsed.query, keep_blank_values=True):
         lower = key.lower()
         if lower.startswith("utm_") or lower in _TRACKING_KEYS:
+            continue
+        if (host == "tumblr.com" or host.endswith(".tumblr.com")) and lower == "source":
             continue
         filtered_query.append((key, value))
 
