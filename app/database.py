@@ -69,6 +69,12 @@ class Database:
                     cancel_requested INTEGER NOT NULL DEFAULT 0
                 );
 
+                CREATE TABLE IF NOT EXISTS chat_settings (
+                    telegram_chat_id INTEGER PRIMARY KEY,
+                    send_files INTEGER NOT NULL CHECK(send_files IN (0, 1)),
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_jobs_status_created
                     ON jobs(status, created_at, id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_normalized_url
@@ -342,6 +348,33 @@ class Database:
                 (user_id,),
             ).fetchall()
             return {row["status"]: row["count"] for row in rows}
+
+    async def get_chat_send_files(self, chat_id: int, *, default: bool = True) -> bool:
+        return await asyncio.to_thread(self._get_chat_send_files_sync, chat_id, default)
+
+    def _get_chat_send_files_sync(self, chat_id: int, default: bool) -> bool:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT send_files FROM chat_settings WHERE telegram_chat_id=?",
+                (chat_id,),
+            ).fetchone()
+            return bool(row["send_files"]) if row else default
+
+    async def set_chat_send_files(self, chat_id: int, enabled: bool) -> None:
+        await asyncio.to_thread(self._set_chat_send_files_sync, chat_id, enabled)
+
+    def _set_chat_send_files_sync(self, chat_id: int, enabled: bool) -> None:
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO chat_settings (telegram_chat_id, send_files, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(telegram_chat_id) DO UPDATE SET
+                    send_files=excluded.send_files,
+                    updated_at=excluded.updated_at
+                """,
+                (chat_id, int(enabled), utc_now()),
+            )
 
     def _execute(self, query: str, params: tuple[Any, ...]) -> None:
         with self._connect() as db:
