@@ -30,6 +30,9 @@ PLATFORMS: dict[str, Platform] = {
     "linkedin": Platform(
         "linkedin", "LinkedIn", ("yt-dlp", "gallery-dl"), ("linkedin.txt",)
     ),
+    "pinterest": Platform(
+        "pinterest", "Pinterest", ("gallery-dl", "yt-dlp"), ("pinterest.txt",)
+    ),
     "other": Platform("other", "Other", ("yt-dlp", "gallery-dl"), ()),
 }
 
@@ -67,6 +70,8 @@ def detect_platform(url: str) -> Platform:
         return PLATFORMS["threads"]
     if host == "linkedin.com" or host.endswith(".linkedin.com") or host == "lnkd.in":
         return PLATFORMS["linkedin"]
+    if host == "pin.it" or host == "pinterest.com" or host.endswith(".pinterest.com"):
+        return PLATFORMS["pinterest"]
     return PLATFORMS["other"]
 
 
