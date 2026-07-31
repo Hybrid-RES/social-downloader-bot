@@ -37,9 +37,12 @@ RUN python -m pip install --upgrade pip \
 
 COPY app/ ./app/
 COPY config/ ./config/
+COPY yt_dlp_plugins/ /etc/yt-dlp/plugins/social-downloader/yt_dlp_plugins/
 
-RUN python -m compileall -q /app/app \
-    && chown -R app:app /app
+RUN python -m compileall -q \
+      /app/app \
+      /etc/yt-dlp/plugins/social-downloader/yt_dlp_plugins \
+    && chown -R app:app /app /etc/yt-dlp/plugins/social-downloader
 
 USER 1000:1000
 
