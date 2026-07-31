@@ -15,6 +15,8 @@ services:
       WORKER_POLL_SECONDS: "2"
       SUBPROCESS_TIMEOUT_SECONDS: "7200"
       HISTORY_LIMIT: "10"
+      TELEGRAM_SEND_FILES: "true"
+      TELEGRAM_MAX_UPLOAD_MB: "49"
       LOG_LEVEL: INFO
 
     volumes:
