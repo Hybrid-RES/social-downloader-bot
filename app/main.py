@@ -52,6 +52,9 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("failed", handlers.failed))
     application.add_handler(CommandHandler("retry", handlers.retry))
     application.add_handler(CommandHandler("cancel", handlers.cancel))
+    application.add_handler(CommandHandler("files_on", handlers.files_on))
+    application.add_handler(CommandHandler("files_off", handlers.files_off))
+    application.add_handler(CommandHandler("files_status", handlers.files_status))
     application.add_handler(CommandHandler("version", handlers.version))
     application.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handlers.handle_links))
     return application
