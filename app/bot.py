@@ -46,8 +46,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assert update.effective_message
     await update.effective_message.reply_text(
         "Отправьте одну или несколько ссылок на YouTube, Instagram, X/Twitter, TikTok, "
-        "Facebook, Threads или LinkedIn. Бот добавит их в очередь и сохранит медиа на сервере.\n\n"
-        "Команды: /status /queue /history /failed /retry ID /cancel ID /version"
+        "Facebook, Threads, LinkedIn, Pinterest или Tumblr. Бот добавит их в очередь, "
+        "сохранит медиа на сервере и при включённой отправке вернёт небольшие файлы в этот чат.\n\n"
+        "Команды: /status /queue /history /failed /retry ID /cancel ID "
+        "/files_on /files_off /files_status /version"
     )
 
 
@@ -94,17 +96,29 @@ def _format_job(job: dict) -> str:
     return f"№{job['id']} [{job['status']}] {job['platform_folder']} — {job['url'][:120]}"
 
 
+async def _file_delivery_enabled(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+) -> bool:
+    settings = _settings(context)
+    if not settings.telegram_send_files:
+        return False
+    return await _database(context).get_chat_send_files(chat_id, default=True)
+
+
 @restricted
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    assert update.effective_message and update.effective_user
+    assert update.effective_message and update.effective_user and update.effective_chat
     counts = await _database(context).counts(update.effective_user.id)
     usage = shutil.disk_usage(_settings(context).download_root)
+    delivery = await _file_delivery_enabled(context, update.effective_chat.id)
     lines = [
         "📊 Состояние загрузчика",
         f"В очереди: {counts.get('queued', 0)}",
         f"В работе: {counts.get('downloading', 0) + counts.get('postprocessing', 0)}",
         f"Завершено: {counts.get('completed', 0)}",
         f"Ошибки: {counts.get('failed', 0)}",
+        f"Отправка файлов в чат: {'включена' if delivery else 'выключена'}",
         f"Свободно на диске: {human_bytes(usage.free)} из {human_bytes(usage.total)}",
     ]
     await update.effective_message.reply_text("\n".join(lines))
@@ -199,6 +213,56 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     }
     await update.effective_message.reply_text(
         mapping.get(result, f"Задание №{job_id} уже находится в состоянии {result}")
+    )
+
+
+@restricted
+async def files_on(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.effective_message and update.effective_chat
+    await _database(context).set_chat_send_files(update.effective_chat.id, True)
+    settings = _settings(context)
+    if settings.telegram_send_files:
+        text = (
+            "📎 Автоматическая отправка файлов в этот чат включена.\n"
+            f"Будут отправляться файлы размером до {settings.telegram_max_upload_mb} MB."
+        )
+    else:
+        text = (
+            "📎 Настройка чата включена, но глобальная отправка отключена переменной "
+            "TELEGRAM_SEND_FILES=false."
+        )
+    await update.effective_message.reply_text(text)
+
+
+@restricted
+async def files_off(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.effective_message and update.effective_chat
+    await _database(context).set_chat_send_files(update.effective_chat.id, False)
+    await update.effective_message.reply_text(
+        "📁 Автоматическая отправка файлов в этот чат выключена. "
+        "Скачивания продолжат сохраняться на сервере."
+    )
+
+
+@restricted
+async def files_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.effective_message and update.effective_chat
+    settings = _settings(context)
+    chat_enabled = await _database(context).get_chat_send_files(
+        update.effective_chat.id,
+        default=True,
+    )
+    effective = settings.telegram_send_files and chat_enabled
+    await update.effective_message.reply_text(
+        "\n".join(
+            [
+                "📎 Отправка скачанных файлов",
+                f"Глобальная настройка: {'включена' if settings.telegram_send_files else 'выключена'}",
+                f"Настройка этого чата: {'включена' if chat_enabled else 'выключена'}",
+                f"Фактическое состояние: {'включено' if effective else 'выключено'}",
+                f"Максимальный размер: {settings.telegram_max_upload_mb} MB",
+            ]
+        )
     )
 
 
