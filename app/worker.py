@@ -13,6 +13,7 @@ from .settings import Settings
 from .tumblr_downloader import DownloadCancelled, DownloadFailed, Downloader
 
 LOGGER = logging.getLogger(__name__)
+_VIDEO_UPLOAD_SUFFIXES = {".mp4"}
 
 
 def human_bytes(value: int) -> str:
@@ -66,6 +67,102 @@ class WorkerPool:
         except TelegramError:
             LOGGER.exception("Unable to send Telegram notification to chat=%s", chat_id)
 
+    async def _send_one_file(
+        self,
+        *,
+        chat_id: int,
+        job_id: int,
+        platform_folder: str,
+        path: Path,
+    ) -> str:
+        caption = f"📎 Задание №{job_id} • {platform_folder}\n{path.name}"[:1024]
+        common = {
+            "chat_id": chat_id,
+            "caption": caption,
+            "filename": path.name,
+            "read_timeout": 180,
+            "write_timeout": 180,
+            "connect_timeout": 30,
+            "pool_timeout": 30,
+        }
+
+        with path.open("rb") as handle:
+            if path.suffix.lower() in _VIDEO_UPLOAD_SUFFIXES:
+                try:
+                    await self.bot.send_video(
+                        video=handle,
+                        supports_streaming=True,
+                        **common,
+                    )
+                    return "video"
+                except TelegramError as exc:
+                    LOGGER.warning(
+                        "job=%s video upload failed for %s, retrying as document: %s",
+                        job_id,
+                        path.name,
+                        exc,
+                    )
+                    handle.seek(0)
+
+            await self.bot.send_document(document=handle, **common)
+            return "document"
+
+    async def _send_downloaded_files(
+        self,
+        *,
+        chat_id: int,
+        job_id: int,
+        platform_folder: str,
+        files: tuple[Path, ...],
+    ) -> None:
+        if not self.settings.telegram_send_files:
+            return
+        if not await self.database.get_chat_send_files(chat_id, default=True):
+            return
+
+        skipped: list[tuple[str, int]] = []
+        failed: list[tuple[str, str]] = []
+        max_bytes = self.settings.telegram_max_upload_bytes
+
+        for path in files:
+            try:
+                size = path.stat().st_size
+            except OSError as exc:
+                failed.append((path.name, f"файл недоступен: {exc}"))
+                continue
+
+            if size > max_bytes:
+                skipped.append((path.name, size))
+                continue
+
+            try:
+                await self._send_one_file(
+                    chat_id=chat_id,
+                    job_id=job_id,
+                    platform_folder=platform_folder,
+                    path=path,
+                )
+            except Exception as exc:  # noqa: BLE001 - delivery must not fail the job
+                LOGGER.exception("job=%s unable to deliver %s to Telegram", job_id, path)
+                failed.append((path.name, f"{type(exc).__name__}: {exc}"))
+
+        if not skipped and not failed:
+            return
+
+        lines = [f"📁 Файлы задания №{job_id} сохранены на сервере."]
+        for name, size in skipped:
+            lines.append(
+                f"⚠️ Не отправлен: {name} ({human_bytes(size)}) — "
+                f"больше лимита {self.settings.telegram_max_upload_mb} MB."
+            )
+        for name, error in failed:
+            lines.append(f"⚠️ Не удалось отправить: {name} — {error[:300]}")
+
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:3970] + "\n… список сокращён"
+        await self._notify(chat_id, text)
+
     async def _process(self, job: dict) -> None:
         job_id = int(job["id"])
         chat_id = int(job["telegram_chat_id"])
@@ -103,6 +200,12 @@ class WorkerPool:
                         f"Папка: {relative_dir}",
                     ]
                 ),
+            )
+            await self._send_downloaded_files(
+                chat_id=chat_id,
+                job_id=job_id,
+                platform_folder=platform.folder,
+                files=result.stored.files,
             )
         except DownloadCancelled as exc:
             await self.database.mark_cancelled(job_id, str(exc))
