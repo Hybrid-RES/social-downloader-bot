@@ -11,6 +11,8 @@ def test_detect_known_platforms() -> None:
     assert detect_platform("https://www.threads.net/@user/post/abc").key == "threads"
     assert detect_platform("https://www.threads.com/@user/post/abc").key == "threads"
     assert detect_platform("https://www.linkedin.com/posts/example").key == "linkedin"
+    assert detect_platform("https://pin.it/1uvrt8N9r").key == "pinterest"
+    assert detect_platform("https://www.pinterest.com/pin/123/").key == "pinterest"
 
 
 def test_normalize_tracking_and_twitter_host() -> None:
