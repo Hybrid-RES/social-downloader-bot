@@ -33,6 +33,17 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _boolean(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "true" if default else "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise SettingsError(
+        f"{name} must be one of: true/false, yes/no, on/off, 1/0"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     telegram_bot_token: str
@@ -44,6 +55,8 @@ class Settings:
     worker_poll_seconds: float
     subprocess_timeout_seconds: int
     history_limit: int
+    telegram_send_files: bool
+    telegram_max_upload_mb: int
     log_level: str
     app_version: str
 
@@ -80,6 +93,8 @@ class Settings:
             worker_poll_seconds=poll_seconds,
             subprocess_timeout_seconds=_positive_int("SUBPROCESS_TIMEOUT_SECONDS", 7200),
             history_limit=_positive_int("HISTORY_LIMIT", 10),
+            telegram_send_files=_boolean("TELEGRAM_SEND_FILES", True),
+            telegram_max_upload_mb=_positive_int("TELEGRAM_MAX_UPLOAD_MB", 49),
             log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
             app_version=os.getenv("APP_VERSION", "dev"),
         )
@@ -91,6 +106,10 @@ class Settings:
     @property
     def work_root(self) -> Path:
         return self.download_root / ".work"
+
+    @property
+    def telegram_max_upload_bytes(self) -> int:
+        return self.telegram_max_upload_mb * 1024 * 1024
 
     def prepare_directories(self) -> None:
         self.config_root.mkdir(parents=True, exist_ok=True)
