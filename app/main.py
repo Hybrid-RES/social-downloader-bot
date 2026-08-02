@@ -4,9 +4,17 @@ import logging
 import signal
 from pathlib import Path
 
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from . import bot as handlers
+from . import menu
 from .database import Database
 from .settings import Settings, SettingsError
 from .worker import WorkerPool
@@ -19,6 +27,7 @@ async def on_start(application: Application) -> None:
     settings: Settings = application.bot_data["settings"]
     database: Database = application.bot_data["database"]
     await database.initialize()
+    await menu.register_commands(application.bot)
     worker = WorkerPool(settings, database, application.bot)
     application.bot_data["workers"] = worker
     worker.start()
@@ -46,6 +55,7 @@ def build_application(settings: Settings) -> Application:
     application.bot_data["database"] = database
 
     application.add_handler(CommandHandler(("start", "help"), handlers.start))
+    application.add_handler(CommandHandler("menu", menu.show_menu))
     application.add_handler(CommandHandler("status", handlers.status))
     application.add_handler(CommandHandler("queue", handlers.queue))
     application.add_handler(CommandHandler("history", handlers.history))
@@ -56,7 +66,15 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("files_off", handlers.files_off))
     application.add_handler(CommandHandler("files_status", handlers.files_status))
     application.add_handler(CommandHandler("version", handlers.version))
-    application.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handlers.handle_links))
+    application.add_handler(
+        CallbackQueryHandler(menu.handle_menu_callback, pattern=r"^menu:")
+    )
+    application.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+            handlers.handle_links,
+        )
+    )
     return application
 
 
@@ -73,7 +91,7 @@ def main() -> None:
     )
     application = build_application(settings)
     application.run_polling(
-        allowed_updates=["message", "edited_message"],
+        allowed_updates=["message", "edited_message", "callback_query"],
         drop_pending_updates=False,
         stop_signals=(signal.SIGINT, signal.SIGTERM),
     )
